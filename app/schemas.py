@@ -50,3 +50,25 @@ class ModuleDef(BaseModel):
     name: str
     description: str
     tables: List[TableDef]
+
+# --- Analytics Response Models ---
+class StatCard(BaseModel):
+    title: str
+    value: str | int | float
+    subtitle: Optional[str] = None
+    trend: Optional[int] = None
+    trendDir: Optional[str] = None # 'up' or 'down'
+
+class ChartDataPoint(BaseModel):
+    name: str
+    value: float | int
+    # Optional extra fields for specific charts
+    percentage: Optional[float] = None 
+    fill: Optional[str] = None
+
+class AnalyticsResponse(BaseModel):
+    stats: List[StatCard]
+    top_diagnoses: List[ChartDataPoint]
+    admissions_by_month: List[ChartDataPoint]
+    demographics_race: List[ChartDataPoint]
+    icu_utilization: List[ChartDataPoint]
