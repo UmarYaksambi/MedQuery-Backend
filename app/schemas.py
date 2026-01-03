@@ -15,19 +15,23 @@ class StatCard(BaseModel):
     subtitle: Optional[str] = None
     trend: Optional[int] = None
 
-# --- Query Interface ---
+# --- Query Interface ---class QueryRequest(BaseModel):
 class QueryRequest(BaseModel):
     question: str
-    model: Optional[str] = "gpt-4"
+    model: Optional[str] = "gpt-4o"
+    sql_only: bool = False # Flag for review mode
+    edited_sql: Optional[str] = None # For when user edits SQL
 
 class QueryResponse(BaseModel):
-    id: str
+    id: Optional[str] = None
     question: str
-    answer: str
-    sql: Optional[str]
+    answer: Optional[str] = None
+    sql: str
     timestamp: datetime
-    executionTime: int
-    rowCount: int
+    executionTime: Optional[int] = 0
+    rowCount: Optional[int] = 0
+    records: Optional[List[Dict[str, Any]]] = None # The actual data
+    status: str = "success" # "pending_review" or "success"
 
 # --- Database Explorer ---
 class TableData(BaseModel):
