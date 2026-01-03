@@ -178,19 +178,18 @@ class ICUStay(Base):
 class ChartEvent(Base):
     __tablename__ = "chartevents"
     
-    # No single PK in CSV, using synthetic ID or composite. Using synthetic for ease.
     id = Column(Integer, primary_key=True, autoincrement=True)
     subject_id = Column(Integer, ForeignKey("patients.subject_id"))
     hadm_id = Column(Integer, ForeignKey("admissions.hadm_id"))
     stay_id = Column(Integer, ForeignKey("icustays.stay_id"))
-    caregiver_id = Column(Integer, nullable=True) 
+    caregiver_id = Column(Integer, nullable=True)
     charttime = Column(DateTime)
-    storetime = Column(DateTime) 
+    storetime = Column(DateTime)
     itemid = Column(Integer) 
     value = Column(String(255)) 
     valuenum = Column(Numeric(10, 4))
     valueuom = Column(String(50))
-    warning = Column(Integer, default=0) 
+    warning = Column(Integer, default=0)
 
     icustay = relationship("ICUStay", back_populates="chartevents")
 
