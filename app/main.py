@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .database import engine, Base
-from .routers import analytics, query, database, history
+from .routers import analytics, query, database, history, upload
 
 # Create tables on startup (good for dev, use Alembic for prod)
 Base.metadata.create_all(bind=engine)
@@ -12,6 +12,7 @@ app = FastAPI(title="MedQuery API", version="1.0.0")
 origins = [
     "http://localhost:5173", # Vite default port
     "http://localhost:3000",
+    "http://localhost:8080",
 ]
 
 app.add_middleware(
@@ -27,6 +28,7 @@ app.include_router(query.router)
 app.include_router(analytics.router)
 app.include_router(database.router)
 app.include_router(history.router)
+app.include_router(upload.router)
 
 @app.get("/")
 def read_root():

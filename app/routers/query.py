@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 import random
 
-router = APIRouter(prefix="/api/query", tags=["Query"])
+router = APIRouter(prefix="/query", tags=["Query"])
 
 @router.post("/", response_model=schemas.QueryResponse)
 async def process_query(request: schemas.QueryRequest, db: Session = Depends(dependencies.get_db)):

@@ -1,9 +1,10 @@
+from typing import List
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from .. import schemas, models, dependencies
 
-router = APIRouter(prefix="/api/analytics", tags=["Analytics"])
+router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
 @router.get("/stats", response_model=List[schemas.StatCard])
 def get_dashboard_stats(db: Session = Depends(dependencies.get_db)):

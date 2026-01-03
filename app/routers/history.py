@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List
 from .. import schemas, models, dependencies
 
-router = APIRouter(prefix="/api/history", tags=["History"])
+router = APIRouter(prefix="/history", tags=["History"])
 
 @router.get("/", response_model=List[schemas.QueryResponse])
 def get_history(db: Session = Depends(dependencies.get_db)):
