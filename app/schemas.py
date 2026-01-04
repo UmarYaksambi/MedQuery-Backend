@@ -76,3 +76,14 @@ class AnalyticsResponse(BaseModel):
     admissions_by_month: List[ChartDataPoint]
     demographics_race: List[ChartDataPoint]
     icu_utilization: List[ChartDataPoint]
+
+# --- History Models ---
+class QueryHistoryItem(BaseModel):
+    id: int
+    question: str
+    generated_sql: Optional[str] = None
+    answer_text: Optional[str] = None
+    timestamp: datetime
+
+    class Config:
+        orm_mode = True

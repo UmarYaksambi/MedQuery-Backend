@@ -29,6 +29,7 @@ app.include_router(analytics.router)
 app.include_router(database.router)
 app.include_router(history.router)
 app.include_router(upload.router)
+app.include_router(history.router)
 
 @app.get("/")
 def read_root():

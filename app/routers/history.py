@@ -1,22 +1,15 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-from typing import List
-from .. import schemas, models, dependencies
+from .. import models, dependencies, schemas
 
 router = APIRouter(prefix="/history", tags=["History"])
 
-@router.get("/", response_model=List[schemas.QueryResponse])
-def get_history(db: Session = Depends(dependencies.get_db)):
-    history = db.query(models.QueryHistory).order_by(models.QueryHistory.timestamp.desc()).limit(50).all()
-    
-    return [
-        schemas.QueryResponse(
-            id=str(h.id),
-            question=h.question,
-            answer=h.answer_text,
-            sql=h.generated_sql,
-            timestamp=h.timestamp,
-            executionTime=h.execution_time_ms,
-            rowCount=h.row_count
-        ) for h in history
-    ]
+@router.get("/", response_model=list[schemas.QueryHistoryItem])
+def get_recent_history(limit: int = 10, db: Session = Depends(dependencies.get_db)):
+    """
+    Fetch the most recent queries executed by the user.
+    """
+    return db.query(models.QueryHistory)\
+             .order_by(models.QueryHistory.timestamp.desc())\
+             .limit(limit)\
+             .all()

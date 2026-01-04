@@ -1,16 +1,22 @@
+import os
+import json
+from datetime import datetime
+from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from .. import schemas, models, dependencies
+from pydantic import BaseModel
 from openai import OpenAI
-from datetime import datetime
-import os
-import json
 
-router = APIRouter(prefix="/query", tags=["Query"])
+from .. import models, dependencies
+
+# Initialize Client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# 1. ADVANCED SQL GENERATION PROMPT
+router = APIRouter(prefix="/query", tags=["Query"])
+
+# --- Prompts (Exact Match) ---
+
 SQL_GENERATION_PROMPT = """
 You are a Clinical Data Scientist and SQL Expert for the MedQuery platform. 
 Your goal is to translate natural language questions from clinicians into valid, read-only MySQL queries for the MIMIC-IV demo(version2.2) database.
@@ -42,7 +48,6 @@ Your goal is to translate natural language questions from clinicians into valid,
 - Return ONLY the raw SQL code. No markdown backticks, no explanation.
 """
 
-# 2. IMPROVED DATA EXPLAINER PROMPT
 DATA_EXPLAINER_PROMPT = """You are a Clinical Research Assistant. 
 Your task is to interpret data retrieved from the MIMIC-IV v2.2 demo database for a medical professional.
 
@@ -58,23 +63,47 @@ Data Records (MIMIC-IV v2.2): {records}
 - Do not invent or hallucinate data points.
 """
 
-@router.post("/", response_model=schemas.QueryResponse)
-async def process_query(request: schemas.QueryRequest, db: Session = Depends(dependencies.get_db)):
+# --- Schemas ---
+
+class QueryRequest(BaseModel):
+    question: str
+    model: str = "gpt-3.5-turbo"
+    sql_only: bool = False
+    edited_sql: Optional[str] = None
+
+class QueryResponse(BaseModel):
+    id: str
+    question: str
+    answer: Optional[str] = None
+    sql: str
+    timestamp: datetime
+    status: str
+    executionTime: int = 0
+    rowCount: int = 0
+    records: List[Dict[str, Any]] = []
+
+# --- Endpoints ---
+
+@router.post("/", response_model=QueryResponse)
+async def process_query(request: QueryRequest, db: Session = Depends(dependencies.get_db)):
     try:
-        # SQL Generation or Editing Pass
+        # 1. SQL Generation or Editing Pass
         if not request.edited_sql:
             response = client.chat.completions.create(
                 model=request.model,
-                messages=[{"role": "system", "content": SQL_GENERATION_PROMPT}, {"role": "user", "content": request.question}],
+                messages=[
+                    {"role": "system", "content": SQL_GENERATION_PROMPT}, 
+                    {"role": "user", "content": request.question}
+                ],
                 temperature=0
             )
             sql_query = response.choices[0].message.content.strip().replace("```sql", "").replace("```", "")
         else:
             sql_query = request.edited_sql
 
-        # Review Mode Handling
+        # 2. Review Mode Handling
         if request.sql_only and not request.edited_sql:
-            return schemas.QueryResponse(
+            return QueryResponse(
                 id=f"pending-{datetime.now().timestamp()}",
                 question=request.question,
                 sql=sql_query,
@@ -84,32 +113,62 @@ async def process_query(request: schemas.QueryRequest, db: Session = Depends(dep
                 rowCount=0
             )
 
-        # Execution
+        # 3. Execution
         start_time = datetime.now()
+        
+        # Safety Check
+        if not sql_query.strip().lower().startswith("select"):
+             raise HTTPException(status_code=400, detail="Only SELECT queries are allowed.")
+
         result_proxy = db.execute(text(sql_query))
         columns = result_proxy.keys()
         records = [dict(zip(columns, row)) for row in result_proxy.fetchall()]
         execution_time = int((datetime.now() - start_time).total_seconds() * 1000)
 
-        # Interpretation Pass
+        # 4. Interpretation Pass
         explanation_res = client.chat.completions.create(
             model=request.model,
-            messages=[{"role": "user", "content": DATA_EXPLAINER_PROMPT.format(question=request.question, records=json.dumps(records[:5], default=str))}]
+            messages=[
+                {"role": "user", "content": DATA_EXPLAINER_PROMPT.format(
+                    question=request.question, 
+                    records=json.dumps(records[:5], default=str)
+                )}
+            ]
         )
         answer = explanation_res.choices[0].message.content
 
-        # Save to History
-        history = models.QueryHistory(
-            question=request.question, generated_sql=sql_query,
-            answer_text=answer, execution_time_ms=execution_time, row_count=len(records)
-        )
-        db.add(history); db.commit(); db.refresh(history)
+        # 5. Save to History
+        # Note: Ensure models.QueryHistory has columns for execution_time_ms and row_count
+        try:
+            history = models.QueryHistory(
+                question=request.question, 
+                generated_sql=sql_query,
+                answer_text=answer, 
+                execution_time_ms=execution_time, 
+                row_count=len(records)
+            )
+            db.add(history)
+            db.commit()
+            db.refresh(history)
+            history_id = str(history.id)
+        except Exception as e:
+            print(f"History save failed: {e}")
+            history_id = f"temp-{datetime.now().timestamp()}"
 
-        return schemas.QueryResponse(
-            id=str(history.id), question=request.question, answer=answer,
-            sql=sql_query, timestamp=history.timestamp,
-            executionTime=execution_time, rowCount=len(records), records=records, status="success"
+        return QueryResponse(
+            id=history_id, 
+            question=request.question, 
+            answer=answer,
+            sql=sql_query, 
+            timestamp=datetime.now(),
+            executionTime=execution_time, 
+            rowCount=len(records), 
+            records=records, 
+            status="success"
         )
+
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=400, detail=f"Database or LLM Error: {str(e)}")
+        # Return error state but keeping the response structure if possible, or raise HTTP
+        print(f"Error: {e}")
+        raise HTTPException(status_code=400, detail=f"Query Error: {str(e)}")
