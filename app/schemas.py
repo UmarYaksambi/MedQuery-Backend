@@ -86,4 +86,18 @@ class QueryHistoryItem(BaseModel):
     timestamp: datetime
 
     class Config:
-        orm_mode = True
+        from_attributes = True
+        
+# --- NoSQL schema ---
+class ClinicalNoteCreate(BaseModel):
+    subject_id: int
+    hadm_id: Optional[int] = None
+    note_type: str = "General"
+    content: str
+
+class ClinicalNote(ClinicalNoteCreate):
+    id: str
+    timestamp: datetime
+
+    class Config:
+        from_attributes = True

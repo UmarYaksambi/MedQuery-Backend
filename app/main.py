@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .database import engine, Base
-from .routers import analytics, query, database, history, upload
+from .routers import analytics, query, database, history, upload, notes, audit, auth
 
 # Create tables on startup (good for dev, use Alembic for prod)
 Base.metadata.create_all(bind=engine)
@@ -24,12 +24,15 @@ app.add_middleware(
 )
 
 # Include Routers
+app.include_router(auth.router)
 app.include_router(query.router)
 app.include_router(analytics.router)
 app.include_router(database.router)
 app.include_router(history.router)
 app.include_router(upload.router)
 app.include_router(history.router)
+app.include_router(notes.router)
+app.include_router(audit.router)
 
 @app.get("/")
 def read_root():

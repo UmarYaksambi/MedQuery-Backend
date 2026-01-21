@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey, Numeric, Text
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey, Numeric, Text, func
 from sqlalchemy.orm import relationship
 from .database import Base
 from datetime import datetime
@@ -208,3 +208,23 @@ class QueryHistory(Base):
     execution_time_ms = Column(Integer)
     row_count = Column(Integer)
     timestamp = Column(DateTime, default=datetime.utcnow)
+    
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(50), unique=True, index=True)
+    hashed_password = Column(String(255))
+    role = Column(String(20))  # "admin" or "doctor"
+    full_name = Column(String(100))
+    
+class UploadRequest(Base):
+    __tablename__ = "upload_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(255))
+    filename = Column(String(255))
+    table_name = Column(String(100))
+    payload = Column(Text, nullable=True) # To store manual entry JSON
+    status = Column(String(50), default="pending") # pending, approved, rejected
+    created_at = Column(DateTime, default=func.now())

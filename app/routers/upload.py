@@ -3,7 +3,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 import pandas as pd
 import io
-from typing import Dict, Any
+import json
+from typing import Dict, Any, List
 from datetime import datetime
 from pydantic import BaseModel
 from .. import models, dependencies, database
@@ -12,7 +13,6 @@ router = APIRouter(prefix="/upload", tags=["Upload"])
 
 # --- Configuration ---
 
-# Map table names to SQLAlchemy Models
 TABLE_MAPPING = {
     "patients": models.Patient,
     "admissions": models.Admission,
@@ -26,7 +26,6 @@ TABLE_MAPPING = {
     "chartevents": models.ChartEvent,
 }
 
-# Date columns for automatic conversion
 DATE_COLS = ['admittime', 'dischtime', 'dob', 'dod', 'intime', 'outtime', 'charttime', 'starttime', 'stoptime']
 
 # --- Pydantic Models ---
@@ -35,15 +34,10 @@ class SingleRecordRequest(BaseModel):
     table_name: str
     data: Dict[str, Any]
 
-# --- Helper Functions ---
+# --- Helper Functions (The "Engine" of the script) ---
 
 def validate_columns(columns: list, model):
-    """
-    Checks if the provided columns match the model's columns.
-    """
     model_columns = [c.name for c in model.__table__.columns]
-    
-    # Check for unknown columns (case-insensitive logic could be added here if needed)
     unknown_columns = set(columns) - set(model_columns)
     if unknown_columns:
         raise HTTPException(
@@ -52,23 +46,8 @@ def validate_columns(columns: list, model):
         )
     return True
 
-# --- Endpoints ---
-
-@router.post("/")
-async def upload_file(
-    file: UploadFile = File(...),
-    table_name: str = Form(...),
-    db: Session = Depends(dependencies.get_db)
-):
-    """
-    Bulk upload via CSV/Excel/JSON file.
-    """
-    if table_name not in TABLE_MAPPING:
-        raise HTTPException(status_code=400, detail=f"Invalid table name: {table_name}")
-    
-    model = TABLE_MAPPING[table_name]
-    
-    # 1. Read File
+async def process_file_to_df(file: UploadFile):
+    """Consolidated file reading and date processing logic"""
     try:
         contents = await file.read()
         buffer = io.BytesIO(contents)
@@ -82,107 +61,102 @@ async def upload_file(
         else:
             raise HTTPException(status_code=400, detail="Unsupported file format")
             
+        # Date conversion
+        for col in df.columns:
+            if col.lower() in DATE_COLS:
+                df[col] = pd.to_datetime(df[col], errors='coerce')
+        
+        # Handle NaNs (Pandas NaN -> SQL NULL)
+        df = df.where(pd.notnull(df), None)
+        return df
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error reading file: {str(e)}")
 
-    # 2. Date conversion
-    for col in df.columns:
-        if col.lower() in DATE_COLS:
-            df[col] = pd.to_datetime(df[col], errors='coerce')
-    
-    # 3. Handle NaNs (Pandas NaN -> SQL NULL)
-    df = df.where(pd.notnull(df), None)
+def parse_clinical_date(value: str):
+    """Original flexible date parsing logic preserved"""
+    try:
+        return datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError:
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(value, fmt)
+            except ValueError:
+                continue
+    return value
 
-    # 4. Validate
+# --- ADMIN ENDPOINTS (Direct Integration) ---
+
+@router.post("/direct")
+async def admin_bulk_upload(
+    file: UploadFile = File(...),
+    table_name: str = Form(...),
+    db: Session = Depends(dependencies.get_db),
+    current_user = Depends(dependencies.role_required(["admin"]))
+):
+    if table_name not in TABLE_MAPPING:
+        raise HTTPException(status_code=400, detail="Invalid table name")
+    
+    model = TABLE_MAPPING[table_name]
+    df = await process_file_to_df(file)
     validate_columns(df.columns.tolist(), model)
 
-    # 5. Insert
     try:
-        df.to_sql(
-            table_name, 
-            con=database.engine, 
-            if_exists='append', 
-            index=False, 
-            chunksize=1000,
-            method='multi'
-        )
-        return {
-            "status": "success",
-            "filename": file.filename,
-            "rows_processed": len(df),
-            "table": table_name
-        }
+        df.to_sql(table_name, con=database.engine, if_exists='append', index=False, method='multi')
+        return {"status": "success", "rows_processed": len(df), "table": table_name}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Insertion Error: {str(e)}")
 
-
-@router.post("/single")
-async def create_single_record(
+@router.post("/single/direct")
+async def admin_single_upload(
     request: SingleRecordRequest,
-    db: Session = Depends(dependencies.get_db)
+    db: Session = Depends(dependencies.get_db),
+    current_user = Depends(dependencies.role_required(["admin"]))
 ):
-    """
-    Inserts a single record. Expects JSON: { "table_name": "...", "data": { ... } }
-    """
-    table_name = request.table_name
-    data = request.data
-
-    if table_name not in TABLE_MAPPING:
-        raise HTTPException(status_code=400, detail=f"Invalid table name: {table_name}")
+    model_class = TABLE_MAPPING.get(request.table_name)
+    processed_data = {k: (parse_clinical_date(v) if k.lower() in DATE_COLS else v) for k, v in request.data.items()}
     
-    model_class = TABLE_MAPPING[table_name]
-    
-    # 1. Validate Columns
-    # We use list(data.keys()) because we only care about the fields sent
-    model_columns = [c.name for c in model_class.__table__.columns]
-    unknown_columns = set(data.keys()) - set(model_columns)
-    if unknown_columns:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Unknown columns: {', '.join(unknown_columns)}"
-        )
-
-    # 2. Process Data (Dates & Empty Strings)
-    processed_data = {}
-    for key, value in data.items():
-        if value == "" or value is None:
-            processed_data[key] = None
-        elif key.lower() in DATE_COLS and isinstance(value, str):
-            # Attempt flexible date parsing
-            try:
-                processed_data[key] = datetime.fromisoformat(value.replace('Z', '+00:00'))
-            except ValueError:
-                try:
-                    processed_data[key] = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
-                except:
-                    try:
-                        processed_data[key] = datetime.strptime(value, "%Y-%m-%d")
-                    except:
-                        processed_data[key] = value # Fallback
-        else:
-            processed_data[key] = value
-
-    # 3. Insert using ORM
     try:
         new_record = model_class(**processed_data)
         db.add(new_record)
         db.commit()
-        db.refresh(new_record)
-        
-        # safely get the ID/Primary Key for the response
-        pk = getattr(new_record, 'id', getattr(new_record, 'subject_id', getattr(new_record, 'stay_id', 'new_record')))
-        
-        return {
-            "status": "success",
-            "message": "Record inserted successfully",
-            "id": pk,
-            "table": table_name
-        }
-    except SQLAlchemyError as e:
-        db.rollback()
-        # Extract underlying error message if possible
-        error_msg = str(e.orig) if hasattr(e, 'orig') else str(e)
-        raise HTTPException(status_code=500, detail=f"Database Error: {error_msg}")
+        return {"status": "success", "message": "Record integrated directly by Admin"}
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=400, detail=f"Error: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+# --- DOCTOR ENDPOINTS (Quarantine/Request) ---
+
+@router.post("/request")
+async def doctor_bulk_request(
+    file: UploadFile = File(...),
+    table_name: str = Form(...),
+    db: Session = Depends(dependencies.get_db),
+    current_user = Depends(dependencies.role_required(["doctor", "admin"]))
+):
+    # Metadata entry in the requests table
+    new_request = models.UploadRequest(
+        username=current_user.get("sub"),
+        filename=file.filename,
+        table_name=table_name,
+        status="pending"
+    )
+    db.add(new_request)
+    db.commit()
+    return {"status": "request_sent", "message": "Bulk upload request sent for Admin review"}
+
+@router.post("/single/request")
+async def doctor_single_request(
+    request: SingleRecordRequest,
+    db: Session = Depends(dependencies.get_db),
+    current_user = Depends(dependencies.role_required(["doctor", "admin"]))
+):
+    new_request = models.UploadRequest(
+        username=current_user.get("sub"),
+        filename="Manual Entry",
+        table_name=request.table_name,
+        payload=json.dumps(request.data), # Save the JSON data
+        status="pending"
+    )
+    db.add(new_request)
+    db.commit()
+    return {"status": "request_sent", "message": "Clinical record queued for Admin approval"}

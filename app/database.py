@@ -3,6 +3,8 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import os
 from dotenv import load_dotenv
+from motor.motor_asyncio import AsyncIOMotorClient
+
 
 load_dotenv()
 
@@ -13,3 +15,7 @@ engine = create_engine(SQLALCHEMY_DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
+
+MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
+mongo_client = AsyncIOMotorClient(MONGODB_URL)
+mongo_db = mongo_client.medquery_notes # This defines the name for import

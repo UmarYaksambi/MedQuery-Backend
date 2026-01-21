@@ -2,72 +2,83 @@ import os
 import json
 from datetime import datetime
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from pydantic import BaseModel
 from openai import OpenAI
 
 from .. import models, dependencies
+from ..auth_utils import role_required, get_current_user # Import security helpers
 
 # Initialize Client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 router = APIRouter(prefix="/query", tags=["Query"])
 
-# --- Prompts (Exact Match) ---
+# --- Enhanced Prompts ---
 
 SQL_GENERATION_PROMPT = """
 You are a Clinical Data Scientist and SQL Expert for the MedQuery platform. 
 Your goal is to translate natural language questions from clinicians into valid, read-only MySQL queries for the MIMIC-IV demo(version2.2) database.
 
-### DATABASE SCHEMA OVERVIEW:
+### FULL DATABASE SCHEMA & RELATIONSHIPS:
 
 1. CORE MODULE:
-   - patients: Demographic info. subject_id (PK), gender, anchor_age, anchor_year, anchor_year_group, dod (date of death).
-   - admissions: Hospital stays. hadm_id (PK), subject_id (FK), admittime, dischtime, deathtime, admission_type, admission_location, discharge_location, insurance, language, marital_status, race, hospital_expire_flag (1=died).
-   - transfers: Patient movement. transfer_id (PK), subject_id (FK), hadm_id (FK), eventtype, careunit, intime, outtime.
+   - `patients`: {subject_id (PK), gender, anchor_age, anchor_year, anchor_year_group, dod (date of death)}.
+   - `admissions`: {hadm_id (PK), subject_id (FK -> patients), admittime, dischtime, deathtime, admission_type, admission_location, discharge_location, insurance, language, marital_status, race, hospital_expire_flag (1=died)}.
+   - `transfers`: {transfer_id (PK), subject_id (FK -> patients), hadm_id (FK -> admissions), eventtype, careunit, intime, outtime}.
 
 2. HOSP MODULE:
-   - diagnoses_icd: Diagnosis codes. subject_id, hadm_id, seq_num, icd_code, icd_version (9 or 10).
-   - procedures_icd: Procedures performed. subject_id, hadm_id, seq_num, chartdate, icd_code, icd_version.
-   - prescriptions: Medications. subject_id, hadm_id, drug, drug_type, starttime, stoptime, dose_val_rx, dose_unit_rx, route.
-   - labevents: Laboratory results. labevent_id (PK), subject_id, hadm_id, itemid (FK), charttime, value, valuenum, valueuom, flag (e.g., 'abnormal').
-   - d_labitems: Lab test definitions. itemid (PK), label, fluid, category.
+   - `diagnoses_icd`: {subject_id (FK -> patients), hadm_id (FK -> admissions), seq_num, icd_code, icd_version (9 or 10)}.
+   - `procedures_icd`: {subject_id (FK -> patients), hadm_id (FK -> admissions), seq_num, chartdate, icd_code, icd_version}.
+   - `prescriptions`: {subject_id (FK -> patients), hadm_id (FK -> admissions), drug, drug_type, starttime, stoptime, dose_val_rx, dose_unit_rx, route}.
+   - `labevents`: {labevent_id (PK), subject_id (FK -> patients), hadm_id (FK -> admissions), itemid (FK -> d_labitems), charttime, value, valuenum, valueuom, flag}.
+   - `d_labitems`: {itemid (PK), label, fluid, category}.
 
 3. ICU MODULE:
-   - icustays: ICU stays. stay_id (PK), subject_id, hadm_id, first_careunit, last_careunit, intime, outtime, los (length of stay).
-   - chartevents: ICU vitals/observations. subject_id, hadm_id, stay_id (FK), charttime, itemid, value, valuenum, valueuom.
+   - `icustays`: {stay_id (PK), subject_id (FK -> patients), hadm_id (FK -> admissions), first_careunit, last_careunit, intime, outtime, los (length of stay)}.
+   - `chartevents`: {subject_id (FK -> patients), hadm_id (FK -> admissions), stay_id (FK -> icustays), charttime, itemid, value, valuenum, valueuom}.
 
-### CRITICAL RULES:
-- Use only read-only SELECT statements.
-- Join tables using 'subject_id' for patient-level joins or 'hadm_id' for admission-level joins.
-- For "female" patients, use 'F'; for "male", use 'M'.
-- When querying diagnoses, join 'diagnoses_icd' on 'admissions'.
-- Always include a LIMIT 100 clause unless the user asks for a specific count.
-- Return ONLY the raw SQL code. No markdown backticks, no explanation.
+### CLINICAL LOGIC RULES:
+- To find a specific lab (e.g., "glucose"), you MUST join 'labevents' with 'd_labitems' and filter by 'd_labitems.label'.
+- "Mortality" or "Died" refers to 'hospital_expire_flag = 1' in the 'admissions' table.
+- "Abnormal" results are identified by 'flag = "abnormal"' in the 'labevents' table.
+- Date differences for "Length of Stay" should use the 'los' column in 'icustays' or 'TIMESTAMPDIFF' on 'admittime' and 'dischtime'.
+
+### CRITICAL SQL RULES:
+- **Join Path for Labs:** JOIN `labevents` with `d_labitems` ON `itemid` to filter by test labels (e.g., 'Glucose').
+- **Joins:** Use INNER JOINs by default. Use `subject_id` for patient history and `hadm_id` for specific hospital encounters.
+- **Filters:** For "abnormal" results, filter `labevents` where `flag = 'abnormal'`.
+- **Gender:** Always use 'M' for male and 'F' for female.
+- **Precision:** Use `ROUND(valuenum, 2)` for numeric clinical values.
+- **Safety:** Always include `LIMIT 100`.
+- **Output:** Return ONLY the raw SQL code. No markdown, no commentary.
 """
 
-DATA_EXPLAINER_PROMPT = """You are a Clinical Research Assistant. 
-Your task is to interpret data retrieved from the MIMIC-IV v2.2 demo database for a medical professional.
+DATA_EXPLAINER_PROMPT = """
+You are a Senior Clinical Research Assistant. Your goal is to provide a structured, professional, and well-defined interpretation of clinical data retrieved from the MIMIC-IV v2.2 demo database.
 
-User's Question: "{question}"
-Data Records (MIMIC-IV v2.2): {records}
+### USER CONTEXT:
+Question: "{question}"
+Raw Data: {records}
 
-### GUIDELINES:
-- Provide a professional, concise summary of the findings in a clinical context.
-- Explicitly mention that this data is sourced from the MIMIC-IV v2.2 demo database.
-- If the data is a count, report it clearly. If it's a list, summarize the primary trends.
-- If no records are found, explain that no matches exist in the MIMIC-IV v2.2 demo dataset.
-- Do not make specific references to individual doctors unless mentioned in the question.
-- Do not invent or hallucinate data points.
+### OUTPUT REQUIREMENTS:
+1. **Executive Summary:** Start with a brief (2-3 sentence) clinical summary of the findings.
+2. **Data Presentation:** - If the data is a list of records, ALWAYS use a **Markdown Table** with clear headers.
+   - If the data is a single count or metric, use **Bold Text** or a **Highlight** block.
+3. **Clinical Context:** Explain the relevance of the found data (e.g., why a specific lab value or diagnosis is significant in this context).
+4. **Data Origin:** Explicitly state: "Data retrieved from MIMIC-IV v2.2 clinical records."
+5. **No Hallucinations:** If no records are found, explain why and suggest what the user might search for instead.
+
+Use professional Markdown to make the report easy for a doctor to read.
 """
 
 # --- Schemas ---
 
 class QueryRequest(BaseModel):
     question: str
-    model: str = "gpt-3.5-turbo"
+    model: str = "gpt-4o"
     sql_only: bool = False
     edited_sql: Optional[str] = None
 
@@ -84,10 +95,17 @@ class QueryResponse(BaseModel):
 
 # --- Endpoints ---
 
-@router.post("/", response_model=QueryResponse)
-async def process_query(request: QueryRequest, db: Session = Depends(dependencies.get_db)):
+# Apply role_required dependency to protect clinical data access
+@router.post("/", 
+             response_model=QueryResponse, 
+             dependencies=[Depends(role_required(["doctor", "admin"]))])
+async def process_query(
+    request: QueryRequest, 
+    db: Session = Depends(dependencies.get_db),
+    current_user: dict = Depends(get_current_user) # Capture which user is querying
+):
     try:
-        # 1. SQL Generation or Editing Pass
+        # 1. SQL Generation
         if not request.edited_sql:
             response = client.chat.completions.create(
                 model=request.model,
@@ -108,55 +126,50 @@ async def process_query(request: QueryRequest, db: Session = Depends(dependencie
                 question=request.question,
                 sql=sql_query,
                 timestamp=datetime.now(),
-                status="pending_review",
-                executionTime=0,
-                rowCount=0
+                status="pending_review"
             )
 
-        # 3. Execution
+        # 3. Execution & Safety Check
         start_time = datetime.now()
-        
-        # Safety Check
-        if not sql_query.strip().lower().startswith("select"):
-             raise HTTPException(status_code=400, detail="Only SELECT queries are allowed.")
+        allowed_starts = ("select", "with", "show", "describe", "desc", "explain")
+        if not sql_query.strip().lower().startswith(allowed_starts):
+             raise HTTPException(
+                 status_code=status.HTTP_400_BAD_REQUEST, 
+                 detail="Security violation: Only read-only clinical queries are allowed."
+             )
 
         result_proxy = db.execute(text(sql_query))
         columns = result_proxy.keys()
         records = [dict(zip(columns, row)) for row in result_proxy.fetchall()]
         execution_time = int((datetime.now() - start_time).total_seconds() * 1000)
 
-        # 4. Interpretation Pass
+        # 4. Enhanced Interpretation Pass
         explanation_res = client.chat.completions.create(
             model=request.model,
             messages=[
                 {"role": "user", "content": DATA_EXPLAINER_PROMPT.format(
                     question=request.question, 
-                    records=json.dumps(records[:5], default=str)
+                    records=json.dumps(records[:10], default=str)
                 )}
             ]
         )
         answer = explanation_res.choices[0].message.content
 
-        # 5. Save to History
-        # Note: Ensure models.QueryHistory has columns for execution_time_ms and row_count
-        try:
-            history = models.QueryHistory(
-                question=request.question, 
-                generated_sql=sql_query,
-                answer_text=answer, 
-                execution_time_ms=execution_time, 
-                row_count=len(records)
-            )
-            db.add(history)
-            db.commit()
-            db.refresh(history)
-            history_id = str(history.id)
-        except Exception as e:
-            print(f"History save failed: {e}")
-            history_id = f"temp-{datetime.now().timestamp()}"
+        # 5. Save to History (Using current_user for the audit trail)
+        history = models.QueryHistory(
+            user_id=current_user.get("username", "Unknown"), # Map to the logged-in user
+            question=request.question, 
+            generated_sql=sql_query,
+            answer_text=answer, 
+            execution_time_ms=execution_time, 
+            row_count=len(records)
+        )
+        db.add(history)
+        db.commit()
+        db.refresh(history)
 
         return QueryResponse(
-            id=history_id, 
+            id=str(history.id), 
             question=request.question, 
             answer=answer,
             sql=sql_query, 
@@ -167,8 +180,12 @@ async def process_query(request: QueryRequest, db: Session = Depends(dependencie
             status="success"
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
-        # Return error state but keeping the response structure if possible, or raise HTTP
-        print(f"Error: {e}")
-        raise HTTPException(status_code=400, detail=f"Query Error: {str(e)}")
+        print(f"Internal Query Error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail=f"Clinical Query Engine Error: {str(e)}"
+        )
