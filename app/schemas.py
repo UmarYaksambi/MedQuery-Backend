@@ -2,18 +2,6 @@ from pydantic import BaseModel
 from typing import List, Optional, Any, Dict
 from datetime import datetime
 
-# --- General ---
-class ChartDataPoint(BaseModel):
-    name: str
-    value: float | int
-    percentage: Optional[float] = None
-    fill: Optional[str] = None
-
-class StatCard(BaseModel):
-    title: str
-    value: int | str
-    subtitle: Optional[str] = None
-    trend: Optional[int] = None
 
 # --- Query Interface ---class QueryRequest(BaseModel):
 class QueryRequest(BaseModel):
