@@ -69,4 +69,4 @@ The API documentation will be available at `http://localhost:8000/docs`.
 * **`app/routers/`**: Contains API endpoints for `query`, `analytics`, `auth`, `notes`, and `history`.
 * **`app/database.py`**: Connection logic for both MySQL and MongoDB.
 * **`app/auth_utils.py`**: JWT token generation and password hashing.
-* **`app/models.py` & `app/schemas.py**`: SQL Alchemy models and Pydantic validation schemas.
+* **`app/models.py` & `app/schemas.py`**: SQL Alchemy models and Pydantic validation schemas.
