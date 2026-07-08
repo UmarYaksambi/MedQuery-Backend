@@ -70,3 +70,13 @@ The API documentation will be available at `http://localhost:8000/docs`.
 * **`app/database.py`**: Connection logic for both MySQL and MongoDB.
 * **`app/auth_utils.py`**: JWT token generation and password hashing.
 * **`app/models.py` & `app/schemas.py`**: SQL Alchemy models and Pydantic validation schemas.
+
+---
+
+<div align="center">
+  <strong>Built with ❤️ to make clinical data more accessible through AI-powered analytics.</strong>
+  <br><br>
+  <a href="https://github.com/UmarYaksambi/MedQuery-Backend">GitHub</a>
+  &bull;
+  <a href="https://buymeacoffee.com/UmarYaksambi">Buy Me a Coffee</a>
+</div>
